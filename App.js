@@ -1,0 +1,293 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import Navbar from './Components/Navbar';
+import Toast from './Components/Toast';
+import Footer from './Components/Footer';
+
+import CartDrawer from './Components/CartDrawer';
+
+// Pages
+import Home from './Pages/Home';
+import Products from './Pages/Products';
+import ProductDetails from './Pages/ProductDetails';
+import Cart from './Pages/Cart'; 
+import Auth from './Pages/Auth';
+import Wishlist from './Pages/Wishlist';
+import Checkout from './Pages/Checkout';
+import OrderSuccess from './Pages/OrderSuccess';
+import Account from './Pages/Account';
+import MyOrders from './Pages/MyOrders';
+import AdminDashboard from './Pages/AdminDashboard';
+
+const getScopedStorageKey = (scope, email) => `shopease_${scope}_${String(email || '').trim().toLowerCase()}`;
+
+function App() {
+  const [isCartOpen, setIsCartOpen] = useState(false);
+  const [toast, setToast] = useState({ message: '', type: '', visible: false });
+
+  const [cart, setCart] = useState([]);
+
+  const [wishlist, setWishlist] = useState([]);
+
+  const [user, setUser] = useState(() => {
+    try {
+      const stored = sessionStorage.getItem('shopease_user');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed && parsed.email && parsed.token) {
+           // Gracefully recover any corrupted hash names from previous test sessions
+           if (/^[a-f0-9:]{20,}$/i.test(parsed.name)) {
+             parsed.name = parsed.email.split('@')[0];
+           }
+           return parsed;
+        }
+      }
+    } catch { /* ignore */ }
+    return null;
+  });
+
+  const [themeSettings, setThemeSettings] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem('shopease_theme_settings')) || {
+        primaryColor: '#2874f0',
+        accentColor: '#fb641b',
+        density: 'compact',
+        highContrast: false
+      };
+    } catch { return { primaryColor: '#2874f0', accentColor: '#fb641b', density: 'compact', highContrast: false }; }
+  });
+
+  const [orders, setOrders] = useState([]);
+  const [addresses, setAddresses] = useState([]);
+
+  const hasHydrated = useRef(false);
+
+  // ── Sync user data on login/logout ──────────────────────────────────────
+  useEffect(() => {
+    if (user && user.token && user.email) {
+        hasHydrated.current = true;
+        sessionStorage.setItem('shopease_user', JSON.stringify(user));
+        const headers = { Authorization: `Bearer ${user.token}` };
+        const scopedCartKey = getScopedStorageKey('cart', user.email);
+        const scopedWishlistKey = getScopedStorageKey('wishlist', user.email);
+        try {
+          const cachedCart = JSON.parse(localStorage.getItem(scopedCartKey));
+          const cachedWishlist = JSON.parse(localStorage.getItem(scopedWishlistKey));
+          setCart(Array.isArray(cachedCart) ? cachedCart : []);
+          setWishlist(Array.isArray(cachedWishlist) ? cachedWishlist : []);
+        } catch {
+          setCart([]);
+          setWishlist([]);
+        }
+
+        fetch(`/api/users/${user.email}/addresses`, { headers })
+          .then(r => r.json())
+          .then(data => {
+            if (Array.isArray(data)) setAddresses(data);
+            else setAddresses([]);
+          })
+          .catch(console.error);
+
+        fetch(`/api/orders/${user.email}`, { headers })
+          .then(r => r.json())
+          .then(data => { if (Array.isArray(data)) setOrders(data); })
+          .catch(console.error);
+
+        fetch(`/api/users/${user.email}/state`, { headers })
+          .then(r => r.json())
+          .then(data => {
+            setCart(Array.isArray(data.cart) ? data.cart : []);
+            setWishlist(Array.isArray(data.wishlist) ? data.wishlist : []);
+          }).catch(console.error);
+      } else if (!user && hasHydrated.current) {
+        // Only clear on actual logout, not on initial mount
+        sessionStorage.removeItem('shopease_user');
+        sessionStorage.removeItem('shopease_user_session');
+        setAddresses([]);
+        setOrders([]);
+        setCart([]);
+        setWishlist([]);
+      }
+    }, [user]);
+
+  // ── Apply theme CSS variables ────────────────────────────────────────────
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty('--primary-color', themeSettings.primaryColor || '#2874f0');
+    root.style.setProperty('--accent-color', themeSettings.accentColor || '#fb641b');
+    localStorage.setItem('shopease_theme_settings', JSON.stringify(themeSettings));
+  }, [themeSettings]);
+
+  // ── Persist cart / wishlist ──────────────────────────────────────────────
+  useEffect(() => {
+    if (user?.email) {
+      localStorage.setItem(getScopedStorageKey('cart', user.email), JSON.stringify(cart));
+      localStorage.setItem(getScopedStorageKey('wishlist', user.email), JSON.stringify(wishlist));
+      fetch(`/api/users/${user.email}/state`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${user.token}` },
+        body: JSON.stringify({ cart, wishlist })
+      }).catch(console.error);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cart, wishlist]);  // intentionally not including `user` to avoid infinite loops
+
+  // ── Toast helper ────────────────────────────────────────────────────────
+  const showToast = (message, type = 'success') => {
+    setToast({ message, type, visible: true });
+    setTimeout(() => setToast({ message: '', type: '', visible: false }), 3500);
+  };
+
+  // ── Cart helpers ────────────────────────────────────────────────────────
+  const addToCart = (product) => {
+    setCart(prev => {
+      const exists = prev.find(i => i.id === product.id);
+      if (exists) return prev.map(i => i.id === product.id ? { ...i, quantity: i.quantity + 1 } : i);
+      return [...prev, { ...product, quantity: 1 }];
+    });
+    showToast(`✅ ${product.name.slice(0, 30)} added to cart!`, 'success');
+  };
+
+  const updateQuantity = (id, qty) => {
+    if (qty < 1) return;
+    setCart(prev => prev.map(i => i.id === id ? { ...i, quantity: qty } : i));
+  };
+
+  const removeFromCart = (id) => {
+    setCart(prev => prev.filter(i => i.id !== id));
+    showToast('Item removed from cart', 'info');
+  };
+
+  const clearCart = () => setCart([]);
+
+  // ── Wishlist ─────────────────────────────────────────────────────────────
+  const toggleWishlist = (product) => {
+    setWishlist(prev => {
+      if (prev.find(i => i.id === product.id)) {
+        showToast('Removed from Wishlist', 'info');
+        return prev.filter(i => i.id !== product.id);
+      }
+      showToast('❤️ Added to Wishlist!', 'success');
+      return [...prev, product];
+    });
+  };
+
+  // ── Orders ───────────────────────────────────────────────────────────────
+  const placeOrder = async (orderItems, totalAmount) => {
+    const newOrder = {
+      userEmail: user?.email || '',
+      date: new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }),
+      items: orderItems,
+      total: totalAmount,
+      status: 'Processing'
+    };
+    try {
+      const resp = await fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${user?.token}` },
+        body: JSON.stringify(newOrder)
+      });
+      if (resp.ok) {
+        const saved = await resp.json();
+        setOrders(prev => [saved, ...prev]);
+        return true; 
+      }
+      return false;
+    } catch (err) {
+      showToast('Error placing order!', 'error');
+      return false;
+    }
+  };
+
+  const cancelOrder = async (orderId) => {
+    if (!user) return;
+    try {
+      const resp = await fetch(`/api/orders/${orderId}/cancel`, {
+        method: 'PUT', headers: { Authorization: `Bearer ${user.token}` }
+      });
+      if (resp.ok) {
+        setOrders(prev => prev.map(o => o._id === orderId ? { ...o, status: 'Cancelled' } : o));
+        showToast('Order cancelled.', 'info');
+      } else {
+        const err = await resp.json();
+        showToast(err.message || 'Error cancelling order', 'error');
+      }
+    } catch {
+      showToast('Network error cancelling order', 'error');
+    }
+  };
+
+  const getCartCount = () => cart.reduce((t, i) => t + i.quantity, 0);
+  const getWishlistCount = () => wishlist.length;
+
+  // ── Density / contrast class ─────────────────────────────────────────────
+  const wrapperClass = [
+    'theme-wrapper',
+    `density-${themeSettings.density || 'compact'}`,
+    themeSettings.highContrast ? 'high-contrast' : ''
+  ].join(' ').trim();
+
+  return (
+    <div className={wrapperClass}>
+      <Router>
+        {/* Toast (always rendered) */}
+        {toast.visible && (
+          <Toast message={toast.message} type={toast.type} onClose={() => setToast({ ...toast, visible: false })} />
+        )}
+
+        {/* Not logged in → show Auth only */}
+        {!user ? (
+          <div style={{ height: '100vh', width: '100vw', overflow: 'hidden', display: 'flex' }}>
+            <Routes>
+              <Route path="/auth" element={<Auth setUser={setUser} showToast={showToast} />} />
+              <Route path="*" element={<Navigate to="/auth" />} />
+            </Routes>
+          </div>
+        ) : (
+          /* Logged in → full app */
+          <>
+            <Navbar
+              cartItemCount={getCartCount()}
+              wishlistCount={getWishlistCount()}
+              user={user}
+              setUser={setUser}
+              onOpenCart={() => setIsCartOpen(true)}
+              themeSettings={themeSettings}
+              setThemeSettings={setThemeSettings}
+            />
+
+            <CartDrawer
+              isOpen={isCartOpen}
+              onClose={() => setIsCartOpen(false)}
+              cart={cart}
+              updateQuantity={updateQuantity}
+              removeFromCart={removeFromCart}
+              getCartCount={getCartCount}
+            />
+
+            <main style={{ minHeight: 'calc(100vh - 120px)' }}>
+              <Routes>
+                <Route path="/" element={<Home addToCart={addToCart} toggleWishlist={toggleWishlist} />} />
+                <Route path="/products" element={<Products addToCart={addToCart} wishlist={wishlist} toggleWishlist={toggleWishlist} />} />
+                <Route path="/product/:id" element={<ProductDetails addToCart={addToCart} wishlist={wishlist} toggleWishlist={toggleWishlist} user={user} showToast={showToast} />} />
+                <Route path="/cart" element={<Cart cart={cart} removeFromCart={removeFromCart} updateQuantity={updateQuantity} clearCart={clearCart} showToast={showToast} toggleWishlist={toggleWishlist} user={user} />} />
+                <Route path="/wishlist" element={<Wishlist wishlist={wishlist} toggleWishlist={toggleWishlist} addToCart={addToCart} user={user} />} />
+                <Route path="/checkout" element={<Checkout cart={cart} placeOrder={placeOrder} clearCart={clearCart} showToast={showToast} user={user} addresses={addresses} setAddresses={setAddresses} />} />
+                <Route path="/order-success" element={<OrderSuccess />} />
+                <Route path="/account" element={<Account user={user} setUser={setUser} orders={orders} showToast={showToast} addresses={addresses} setAddresses={setAddresses} />} />
+                <Route path="/orders" element={<MyOrders orders={orders} cancelOrder={cancelOrder} user={user} showToast={showToast} />} />
+                <Route path="/admin" element={user.isAdmin ? <AdminDashboard user={user} showToast={showToast} /> : <Navigate to="/" />} />
+                <Route path="/auth" element={<Navigate to={user.isAdmin ? '/admin' : '/'} />} />
+                <Route path="*" element={<Navigate to="/" />} />
+              </Routes>
+            </main>
+
+            <Footer />
+          </>
+        )}
+      </Router>
+    </div>
+  );
+}
+
+export default App;
